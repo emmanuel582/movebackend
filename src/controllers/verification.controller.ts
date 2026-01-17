@@ -22,32 +22,95 @@ export const submitIdentity = async (req: Request, res: Response) => {
         if (userCheckError || !existingUser) {
             console.log('[Verification] User not found in public.users, creating...');
 
-            // Get user details from auth
-            const { data: { user: authUser } } = await supabase.auth.getUser(req.headers.authorization?.split(' ')[1] || '');
+            // Get user details from auth middleware directly (avoids extra network call)
+            const authUser = req.user;
 
             if (authUser) {
-                // Create user in public.users table
-                const { error: insertError } = await supabase
+                // Clean phone number - set to null if empty string
+                let phoneNumber = authUser.user_metadata?.phone || null;
+                if (phoneNumber && phoneNumber.trim() === '') {
+                    phoneNumber = null;
+                }
+
+                // Use upsert to handle race conditions and duplicate key errors
+                const { error: upsertError } = await supabase
                     .from('users')
-                    .insert({
+                    .upsert({
                         id: userId,
                         email: authUser.email,
                         full_name: authUser.user_metadata?.full_name || authUser.email?.split('@')[0],
-                        phone: authUser.user_metadata?.phone || null,
+                        phone: phoneNumber,
                         user_type: 'traveler',
                         current_mode: 'traveler',
                         is_verified: false
+                    }, {
+                        onConflict: 'id',
+                        ignoreDuplicates: false
                     });
 
-                if (insertError) {
-                    console.error('[Verification] Failed to create user:', insertError);
-                    throw new Error('Failed to create user record');
+                if (upsertError) {
+                    console.error('[Verification] Failed to create user with Service Role:', {
+                        code: upsertError.code,
+                        message: upsertError.message,
+                        details: upsertError.details,
+                        hint: upsertError.hint
+                    });
+
+                    // If it's a phone number conflict, try again without phone
+                    if (upsertError.code === '23505' && upsertError.message.includes('phone')) {
+                        console.log('[Verification] Phone conflict detected, retrying without phone number');
+                        const { error: retryError } = await supabase
+                            .from('users')
+                            .upsert({
+                                id: userId,
+                                email: authUser.email,
+                                full_name: authUser.user_metadata?.full_name || authUser.email?.split('@')[0],
+                                phone: null, // Set to null to avoid conflict
+                                user_type: 'traveler',
+                                current_mode: 'traveler',
+                                is_verified: false
+                            }, {
+                                onConflict: 'id',
+                                ignoreDuplicates: false
+                            });
+
+                        if (retryError) {
+                            // Final verification - check if user exists
+                            const { data: verifyUser, error: verifyError } = await supabase
+                                .from('users')
+                                .select('id')
+                                .eq('id', userId)
+                                .single();
+
+                            if (verifyError || !verifyUser) {
+                                throw new Error('Failed to create user record');
+                            }
+                            console.log('[Verification] User already exists, continuing...');
+                        } else {
+                            console.log('[Verification] User created successfully without phone number');
+                        }
+                    } else {
+                        // For other errors, verify user exists
+                        const { data: verifyUser, error: verifyError } = await supabase
+                            .from('users')
+                            .select('id')
+                            .eq('id', userId)
+                            .single();
+
+                        if (verifyError || !verifyUser) {
+                            throw new Error('Failed to create user record');
+                        }
+                        console.log('[Verification] User already exists, continuing...');
+                    }
+                } else {
+                    console.log('[Verification] User created successfully');
                 }
 
-                // Also create wallet
-                await supabase.from('wallets').insert({ user_id: userId });
-
-                console.log('[Verification] User created successfully');
+                // Also create wallet (use upsert to avoid duplicate errors)
+                await supabase.from('wallets').upsert(
+                    { user_id: userId },
+                    { onConflict: 'user_id', ignoreDuplicates: true }
+                );
             }
         }
 

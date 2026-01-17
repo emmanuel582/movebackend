@@ -132,30 +132,112 @@ export const getMe = async (req: Request, res: Response) => {
                 return res.status(404).json({ status: 'error', message: 'User not found' });
             }
 
-            // Create user in public.users table
-            const { data: newUser, error: insertError } = await supabase
+            // Use upsert to handle race conditions and duplicate key errors
+            let phoneNumber = authUser.user_metadata?.phone || null;
+            // Clean phone number - set to null if empty string
+            if (phoneNumber && phoneNumber.trim() === '') {
+                phoneNumber = null;
+            }
+
+            const { data: newUser, error: upsertError } = await supabase
                 .from('users')
-                .insert({
+                .upsert({
                     id: userId,
                     email: authUser.email,
                     full_name: authUser.user_metadata?.full_name || authUser.email?.split('@')[0],
-                    phone: authUser.user_metadata?.phone || null,
+                    phone: phoneNumber,
                     user_type: 'traveler', // Default type
                     current_mode: 'traveler',
                     is_verified: false
+                }, {
+                    onConflict: 'id',
+                    ignoreDuplicates: false
                 })
                 .select()
                 .single();
 
-            if (insertError) {
-                console.error('[Auth] Failed to auto-create user:', insertError);
-                return res.status(404).json({ status: 'error', message: 'User not found' });
+            if (upsertError) {
+                console.error('[Auth] Failed to auto-create user with Service Role:', {
+                    code: upsertError.code,
+                    message: upsertError.message,
+                    details: upsertError.details,
+                    hint: upsertError.hint
+                });
+
+                // If it's a phone number conflict, try again without phone
+                if (upsertError.code === '23505' && upsertError.message.includes('phone')) {
+                    console.log('[Auth] Phone conflict detected, retrying without phone number');
+                    const { data: retryUser, error: retryError } = await supabase
+                        .from('users')
+                        .upsert({
+                            id: userId,
+                            email: authUser.email,
+                            full_name: authUser.user_metadata?.full_name || authUser.email?.split('@')[0],
+                            phone: null, // Set to null to avoid conflict
+                            user_type: 'traveler',
+                            current_mode: 'traveler',
+                            is_verified: false
+                        }, {
+                            onConflict: 'id',
+                            ignoreDuplicates: false
+                        })
+                        .select()
+                        .single();
+
+                    if (!retryError && retryUser) {
+                        user = retryUser;
+                        console.log('[Auth] User created successfully without phone number');
+                    } else {
+                        // Final fallback - try to fetch existing user
+                        const { data: existingUser, error: fetchError } = await supabase
+                            .from('users')
+                            .select('*')
+                            .eq('id', userId)
+                            .single();
+
+                        if (!fetchError && existingUser) {
+                            console.log('[Auth] User already exists, using existing record');
+                            user = existingUser;
+                        } else {
+                            return res.status(404).json({ status: 'error', message: 'User not found' });
+                        }
+                    }
+                } else {
+                    // If upsert failed for other reasons, try to fetch the user
+                    const { data: retryUser, error: retryError } = await supabase
+                        .from('users')
+                        .select('*')
+                        .eq('id', userId)
+                        .single();
+
+                    if (!retryError && retryUser) {
+                        console.log('[Auth] User was created by another request, using existing record');
+                        user = retryUser;
+                    } else {
+                        return res.status(404).json({ status: 'error', message: 'User not found' });
+                    }
+                }
+            } else {
+                user = newUser;
+                console.log('[Auth] User synced successfully');
             }
 
-            // Also create wallet
-            await supabase.from('wallets').insert({ user_id: userId });
-            console.log('[Auth] User synced successfully');
-            user = newUser;
+            // Also create wallet (use upsert to avoid duplicate errors)
+            await supabase.from('wallets').upsert(
+                { user_id: userId },
+                { onConflict: 'user_id', ignoreDuplicates: true }
+            );
+        }
+
+        // Fetch Auth Metadata to backfill missing columns (Bank Details Fix)
+        const token = req.headers.authorization?.split(' ')[1];
+        if (token) {
+            const { data: { user: authUser } } = await supabase.auth.getUser(token);
+            if (authUser?.user_metadata) {
+                user.bank_name = user.bank_name || authUser.user_metadata.bank_name;
+                user.account_number = user.account_number || authUser.user_metadata.account_number;
+                user.account_name = user.account_name || authUser.user_metadata.account_name;
+            }
         }
 
         res.status(200).json({ status: 'success', data: user });

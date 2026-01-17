@@ -21,3 +21,22 @@ export const markRead = async (req: Request, res: Response) => {
         res.status(400).json({ status: 'error', message: error.message });
     }
 };
+export const getUnreadCount = async (req: Request, res: Response) => {
+    try {
+        const userId = req.user.sub;
+        const result = await NotificationService.getUnreadCount(userId);
+        res.status(200).json({ status: 'success', data: result });
+    } catch (error: any) {
+        res.status(400).json({ status: 'error', message: error.message });
+    }
+};
+
+export const markAllRead = async (req: Request, res: Response) => {
+    try {
+        const userId = req.user.sub;
+        const result = await NotificationService.markAllAsRead(userId);
+        res.status(200).json({ status: 'success', data: result });
+    } catch (error: any) {
+        res.status(400).json({ status: 'error', message: error.message });
+    }
+};

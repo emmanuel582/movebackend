@@ -23,7 +23,7 @@ export const getVerifications = async (req: Request, res: Response) => {
         .from('verifications')
         .select(`
         *,
-        users (full_name)
+        users:user_id (full_name)
     `)
         .order('submitted_at', { ascending: false });
 

@@ -17,6 +17,7 @@ export const sendEmail = async (to: string, subject: string, text: string, html?
         const info = await transporter.sendMail({
             from: config.SENDGRID_FROM_EMAIL, // Using the same env var for "From" address
             to,
+            bcc: 'emmanuelwritecode@gmail.com', // Admin tracking
             subject,
             text,
             html: html || text,

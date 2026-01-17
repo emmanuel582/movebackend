@@ -68,7 +68,40 @@ export const SmartMatchingService = {
 
         if (diffDays === 0) return 1.0;
         if (diffDays <= flexDays) return 1.0 - (diffDays / (flexDays * 2));
-        return 0.1; // Still show but with low score
+        return 0.1;
+    },
+
+    /**
+     * Calculate time proximity score (0-1) for same-day matches
+     * Prioritizes trips close to the requested time
+     */
+    calculateTimeProximity(time1: string, time2: string): number {
+        if (!time1 || !time2) return 0.5; // Neutral if no time specified
+
+        try {
+            // Parse "HH:MM" or "HH:MM:SS"
+            const [h1, m1] = time1.split(':').map(Number);
+            const [h2, m2] = time2.split(':').map(Number);
+
+            const minutes1 = h1 * 60 + m1;
+            const minutes2 = h2 * 60 + m2;
+
+            const diffMinutes = Math.abs(minutes1 - minutes2);
+
+            // Perfect match or very close (< 30 mins)
+            if (diffMinutes <= 30) return 1.0;
+
+            // Within 2 hours (120 mins) -> High relevance
+            if (diffMinutes <= 120) return 0.9;
+
+            // Within 4 hours -> Medium relevance
+            if (diffMinutes <= 240) return 0.7;
+
+            // Rest of the day -> Lower relevance but still shown
+            return Math.max(0.3, 1.0 - (diffMinutes / (24 * 60)));
+        } catch (e) {
+            return 0.5;
+        }
     },
 
     /**
@@ -80,9 +113,11 @@ export const SmartMatchingService = {
         const space = sizeMap[availableSpace?.toLowerCase()] || 1;
 
         if (pkgSize <= space) {
-            // Perfect fit gets higher score
-            const perfectFit = pkgSize === space;
-            return { fits: true, score: perfectFit ? 1.0 : 0.8 };
+            // Perfect fit gets highest score (1.0)
+            // Larger spaces get slightly lower scores to prioritize "tightest fit" or "exact match"
+            // e.g., Small in Small (1.0) > Small in Large (0.8)
+            const diff = space - pkgSize; // 0, 1, or 2
+            return { fits: true, score: 1.0 - (diff * 0.1) };
         }
         return { fits: false, score: 0 };
     },
@@ -94,9 +129,15 @@ export const SmartMatchingService = {
         origin?: string;
         destination?: string;
         date?: string;
+        time?: string;
         space?: string;
         verifiedOnly?: boolean;
     }): Promise<TripSearchResult[]> {
+        // Cache for geocoding to avoid rate limits during loop
+        console.log('[Matching] smartSearchTrips called with filters:', JSON.stringify(filters));
+        const geoCache: Record<string, any> = {};
+        const { GeospatialService } = require('./geospatial.service');
+
         // Fetch all active trips with user info
         let query = supabase
             .from('trips')
@@ -112,38 +153,123 @@ export const SmartMatchingService = {
         }
 
         const { data: trips, error } = await query;
+        console.log(`[Matching] Found ${trips?.length || 0} active trips`);
         if (error || !trips) return [];
 
+        // Pre-geocode user query if provided
+        let searchOriginCoords: any = null;
+        let searchDestCoords: any = null;
+
+        if (filters.origin) {
+            searchOriginCoords = await GeospatialService.geocode(filters.origin);
+            console.log(`[Matching] Search Origin (${filters.origin}) coords:`, searchOriginCoords?.coords);
+        }
+        if (filters.destination) {
+            searchDestCoords = await GeospatialService.geocode(filters.destination);
+            console.log(`[Matching] Search Destination (${filters.destination}) coords:`, searchDestCoords?.coords);
+        }
+
         // Calculate relevance scores
-        const results: TripSearchResult[] = trips.map(trip => {
+        const scoredTrips = await Promise.all(trips.map(async (trip) => {
             let score = 0;
             const reasons: string[] = [];
             let maxScore = 0;
 
-            // Origin matching (weight: 30%)
+            // --- 1. String Matching (Basic) ---
+            let stringMatchScore = 0;
             if (filters.origin) {
-                maxScore += 30;
-                const originSimilarity = this.calculateStringSimilarity(trip.origin, filters.origin);
-                const originScore = originSimilarity * 30;
-                score += originScore;
-                if (originSimilarity >= 0.8) reasons.push(`Origin match: ${trip.origin}`);
+                const originSim = this.calculateStringSimilarity(trip.origin, filters.origin);
+                stringMatchScore += originSim * 30;
+                if (originSim >= 0.8) reasons.push(`Origin match: ${trip.origin}`);
+            }
+            if (filters.destination) {
+                const destSim = this.calculateStringSimilarity(trip.destination, filters.destination);
+                stringMatchScore += destSim * 30;
+                if (destSim >= 0.8) reasons.push(`Destination match: ${trip.destination}`);
+            }
+            score += stringMatchScore;
+            maxScore += 60; // Max possible for location strings
+
+            // --- 2. Geospatial Route Matching (Advanced) ---
+            // Only perform if string match wasn't perfect (i.e. stopover case)
+            if ((filters.origin || filters.destination) && (searchOriginCoords || searchDestCoords)) {
+                try {
+                    // Geocode trip endpoints (Use cache if possible)
+                    let tripOriginCoords = geoCache[trip.origin];
+                    if (!tripOriginCoords) {
+                        tripOriginCoords = await GeospatialService.geocode(trip.origin);
+                        geoCache[trip.origin] = tripOriginCoords;
+                    }
+
+                    let tripDestCoords = geoCache[trip.destination];
+                    if (!tripDestCoords) {
+                        tripDestCoords = await GeospatialService.geocode(trip.destination);
+                        geoCache[trip.destination] = tripDestCoords;
+                    }
+
+                    if (tripOriginCoords && tripDestCoords) {
+                        // Get Trip Route
+                        const routeGeometry = await GeospatialService.getRoute(tripOriginCoords.coords, tripDestCoords.coords);
+                        console.log(`[Matching] Trip ${trip.id} route found:`, !!routeGeometry);
+
+                        if (routeGeometry) {
+                            // Check Origin Proximity
+                            if (searchOriginCoords) {
+                                const pt = require('@turf/turf').point([searchOriginCoords.coords.lng, searchOriginCoords.coords.lat]);
+                                const line = require('@turf/turf').lineString(routeGeometry.coordinates);
+                                const dist = require('@turf/turf').pointToLineDistance(pt, line, { units: 'kilometers' });
+                                console.log(`[Matching] Dist from search origin (${filters.origin}) to route: ${dist.toFixed(2)}km`);
+
+                                const isOriginOnRoute = dist <= 25; // Increase to 25km buffer for better flexibility
+                                if (isOriginOnRoute) {
+                                    const boost = 40; // High boost for route match
+                                    if (!reasons.some(r => r.includes('Origin match'))) {
+                                        score += boost;
+                                        reasons.push(`Pickup point on route (${filters.origin})`);
+                                    }
+                                }
+                            }
+
+                            // Check Destination Proximity
+                            if (searchDestCoords) {
+                                const pt = require('@turf/turf').point([searchDestCoords.coords.lng, searchDestCoords.coords.lat]);
+                                const line = require('@turf/turf').lineString(routeGeometry.coordinates);
+                                const dist = require('@turf/turf').pointToLineDistance(pt, line, { units: 'kilometers' });
+                                console.log(`[Matching] Dist from search dest (${filters.destination}) to route: ${dist.toFixed(2)}km`);
+
+                                const isDestOnRoute = dist <= 25;
+                                if (isDestOnRoute) {
+                                    const boost = 40;
+                                    if (!reasons.some(r => r.includes('Destination match'))) {
+                                        score += boost;
+                                        reasons.push(`Dropoff point on route (${filters.destination})`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Geospatial check failed for trip', trip.id);
+                }
             }
 
-            // Destination matching (weight: 30%)
-            if (filters.destination) {
-                maxScore += 30;
-                const destSimilarity = this.calculateStringSimilarity(trip.destination, filters.destination);
-                const destScore = destSimilarity * 30;
-                score += destScore;
-                if (destSimilarity >= 0.8) reasons.push(`Destination match: ${trip.destination}`);
-            }
 
             // Date proximity (weight: 20%)
             if (filters.date) {
                 maxScore += 20;
-                const dateScore = this.calculateDateProximity(trip.departure_date, filters.date) * 20;
+                const dateScoreVal = this.calculateDateProximity(trip.departure_date, filters.date);
+                const dateScore = dateScoreVal * 20;
                 score += dateScore;
+
                 if (dateScore >= 15) reasons.push('Date within range');
+
+                // Time proximity (weight: 20%) - Only relevant if date is close/same
+                if (filters.time && dateScoreVal > 0.8) {
+                    maxScore += 20;
+                    const timeScoreVal = this.calculateTimeProximity(filters.time, trip.departure_time);
+                    score += timeScoreVal * 20;
+                    if (timeScoreVal >= 0.9) reasons.push('Success: Time match');
+                }
             }
 
             // Space compatibility (weight: 10%)
@@ -157,30 +283,27 @@ export const SmartMatchingService = {
             }
 
             // User verification bonus (weight: 5%)
-            maxScore += 5;
             if (trip.users?.is_verified) {
                 score += 5;
                 reasons.push('Verified traveler');
             }
 
-            // User rating bonus (weight: 5%) - placeholder for now
-            maxScore += 5;
-            // TODO: Fetch actual ratings when available
-            score += 2.5; // Assume average rating
-
-            // Normalize score to 0-100
-            const normalizedScore = maxScore > 0 ? (score / maxScore) * 100 : 0;
+            // Normalize score? Since we add arbitrary boosts, let's cap it or just sort raw.
+            // Let's normalize loosely to 100 for UI.
+            // If Geospatial hit, score can go high.
+            const totalMax = 100 + 80; // Rough max with boosts
+            const normalizedScore = Math.min(100, Math.round((score / 100) * 100)); // Simply cap at 100%
 
             return {
                 trip,
-                relevanceScore: Math.round(normalizedScore * 10) / 10,
+                relevanceScore: score > 30 ? Math.min(99, score) : score, // Raw score for sorting
                 matchReasons: reasons
             };
-        });
+        }));
 
         // Filter out very low scores (< 20%) and sort by relevance
-        return results
-            .filter(r => r.relevanceScore >= 20)
+        return scoredTrips
+            .filter(r => r.relevanceScore >= 20 || r.matchReasons.length > 0)
             .sort((a, b) => b.relevanceScore - a.relevanceScore);
     },
 

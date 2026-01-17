@@ -40,7 +40,14 @@ export const TripService = {
             .from('trips')
             .select(`
         *,
-        matches (count)
+        departure_date,
+        matches (
+          id,
+          payments (
+            traveler_earnings,
+            payment_status
+          )
+        )
       `)
             .eq('traveler_id', userId)
             .order('created_at', { ascending: false });
@@ -48,14 +55,33 @@ export const TripService = {
         if (error) throw error;
 
         // Map to Frontend Structure
-        return trips.map(trip => ({
-            id: trip.id,
-            origin: trip.origin,
-            destination: trip.destination,
-            date: trip.departure_date, // Format if needed, ideally frontend handles ISO
-            request_count: trip.matches?.[0]?.count || 0, // Approximate pending matches count if matches returns array of aggregation
-            status: trip.status
-        }));
+        return trips.map(trip => {
+            // Calculate total earnings for this trip
+            const totalEarnings = trip.matches?.reduce((sum: number, match: any) => {
+                const matchEarnings = match.payments?.reduce((pSum: number, payment: any) => {
+                    return payment.payment_status === 'paid' ? pSum + (payment.traveler_earnings || 0) : pSum;
+                }, 0) || 0;
+                return sum + matchEarnings;
+            }, 0) || 0;
+
+            // Calculate pending requests count (active matches that are pending)
+            // Note: The previous count logic might have been relying on a separate count query or property not shown fully in the previous select, 
+            // but here we have the matches array, so we can filter.
+            // Assuming we want to show count of matches that need attention? Or just total matches? 
+            // The previous code had `matches (count)`, assuming head:true or similar. 
+            // Let's just count all matches for now or filtered ones if needed.
+            const requestCount = trip.matches?.length || 0;
+
+            return {
+                id: trip.id,
+                origin: trip.origin,
+                destination: trip.destination,
+                date: trip.departure_date,
+                request_count: requestCount,
+                total_earnings: totalEarnings,
+                status: trip.status
+            };
+        });
     },
 
     async getTripById(tripId: string) {
@@ -92,6 +118,7 @@ export const TripService = {
             origin: filters.origin,
             destination: filters.destination,
             date: filters.date,
+            time: filters.time,
             space: filters.space,
             verifiedOnly: filters.verifiedOnly === 'true' || filters.verifiedOnly === true
         });

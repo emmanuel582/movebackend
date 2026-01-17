@@ -68,16 +68,38 @@ export const DeliveryService = {
     },
 
     async getRequestById(requestId: string) {
+        // First get the request and matches
         const { data: request, error } = await supabase
             .from('delivery_requests')
             .select(`
-        *,
-        users (full_name, is_verified)
-      `)
+                *,
+                business:users!business_id (full_name, is_verified),
+                matches (
+                    *,
+                    traveler:users!traveler_id (full_name, phone)
+                )
+            `)
             .eq('id', requestId)
             .single();
 
-        if (error) throw error;
+        if (error) {
+            console.error('Error in getRequestById:', error);
+            throw error;
+        }
+
+        // Then get payments for those matches
+        const matchIds = request.matches?.map((m: any) => m.id) || [];
+        if (matchIds.length > 0) {
+            const { data: payments } = await supabase
+                .from('payments')
+                .select('*')
+                .in('match_id', matchIds);
+
+            request.payments = payments || [];
+        } else {
+            request.payments = [];
+        }
+
         return request;
     },
 

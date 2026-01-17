@@ -16,13 +16,42 @@ import adminRoutes from './routes/admin.routes';
 import userRoutes from './routes/user.routes';
 import notificationRoutes from './routes/notification.routes';
 import { ratingRoutes, disputeRoutes } from './routes/rating_dispute.routes';
+import mapsRoutes from './routes/maps.routes';
 
 const app = express();
 
 // Middleware
 app.use(helmet());
-app.use(cors());
-app.use(morgan('dev'));
+
+// CORS Configuration
+const corsOptions = {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        // Allow requests with no origin (mobile apps, Postman, etc.)
+        if (!origin) return callback(null, true);
+
+        // In production, only allow specific domains
+        const allowedOrigins = config.NODE_ENV === 'production'
+            ? [config.FRONTEND_URL, 'https://yourdomain.com'] // Add your actual domains
+            : ['http://localhost:8081', 'http://localhost:19006', config.FRONTEND_URL];
+
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            console.warn(`CORS blocked origin: ${origin}`);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+app.use(morgan(config.NODE_ENV === 'production' ? 'combined' : 'dev'));
+
+// Stripe Webhook needs RAW body
+import { stripeWebhook } from './controllers/payment.controller';
+app.post('/api/payments/webhook', express.raw({ type: '*/*' }), stripeWebhook);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -44,6 +73,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/disputes', disputeRoutes);
+app.use('/api/maps', mapsRoutes);
 
 // Error Handling Middleware (Placeholder)
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {

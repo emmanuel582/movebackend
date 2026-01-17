@@ -49,11 +49,15 @@ export const VerificationService = {
 
         if (error) throw error;
 
-        // 3. Sync to Firestore for Real-time Admin Queue
-        await this.syncToFirestore(verification);
+        // 3. Sync to Firestore for Real-time Admin Queue (non-blocking)
+        this.syncToFirestore(verification).catch(err =>
+            console.warn('[Verification] Firestore sync failed (non-critical):', err.message)
+        );
 
-        // 4. Update User Status in Firestore (Real-time Feedback)
-        await this.updateUserFirestoreStatus(userId, 'pending');
+        // 4. Update User Status in Firestore (Real-time Feedback) (non-blocking)
+        this.updateUserFirestoreStatus(userId, 'pending').catch(err =>
+            console.warn('[Verification] Firestore status update failed (non-critical):', err.message)
+        );
 
         return verification;
     },
@@ -81,8 +85,13 @@ export const VerificationService = {
 
         if (error) throw error;
 
-        await this.syncToFirestore(verification);
-        await this.updateUserFirestoreStatus(userId, 'pending'); // Or 'business_pending' if distinct
+        // Firestore sync (non-blocking)
+        this.syncToFirestore(verification).catch(err =>
+            console.warn('[Verification] Firestore sync failed (non-critical):', err.message)
+        );
+        this.updateUserFirestoreStatus(userId, 'pending').catch(err =>
+            console.warn('[Verification] Firestore status update failed (non-critical):', err.message)
+        );
 
         return verification;
     },
@@ -109,16 +118,18 @@ export const VerificationService = {
             }
         };
 
-        // Retry logic for Firestore sync
+        // Retry logic for Firestore sync (non-blocking - don't fail if Firestore is unavailable)
         for (let attempt = 1; attempt <= retries; attempt++) {
             try {
                 await db.collection('verification_queue').doc(verification.id).set(firestoreData);
                 console.log(`[Firestore] Synced verification ${verification.id} to queue`);
                 return; // Success, exit
-            } catch (error) {
-                console.error(`[Firestore] Sync attempt ${attempt}/${retries} failed:`, error);
+            } catch (error: any) {
+                console.error(`[Firestore] Sync attempt ${attempt}/${retries} failed:`, error.message || error);
                 if (attempt === retries) {
-                    throw new Error(`Failed to sync verification to Firestore after ${retries} attempts`);
+                    // Don't throw - just log. Firestore is optional for now
+                    console.warn(`[Firestore] Failed to sync after ${retries} attempts. Continuing without Firestore sync.`);
+                    return; // Continue without Firestore - don't block the request
                 }
                 // Wait before retry (exponential backoff)
                 await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
@@ -133,16 +144,18 @@ export const VerificationService = {
             updatedAt: new Date().toISOString()
         };
 
-        // Retry logic for Firestore user status update
+        // Retry logic for Firestore user status update (non-blocking)
         for (let attempt = 1; attempt <= retries; attempt++) {
             try {
                 await db.collection('users').doc(userId).set(firestoreData, { merge: true });
                 console.log(`[Firestore] Updated user ${userId} status to ${status}, verified: ${isVerified}`);
                 return; // Success, exit
-            } catch (error) {
-                console.error(`[Firestore] User status update attempt ${attempt}/${retries} failed:`, error);
+            } catch (error: any) {
+                console.error(`[Firestore] User status update attempt ${attempt}/${retries} failed:`, error.message || error);
                 if (attempt === retries) {
-                    throw new Error(`Failed to update user status in Firestore after ${retries} attempts`);
+                    // Don't throw - just log. Firestore is optional
+                    console.warn(`[Firestore] Failed to update user status after ${retries} attempts. Continuing without Firestore.`);
+                    return; // Continue without Firestore - don't block
                 }
                 // Wait before retry (exponential backoff)
                 await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
@@ -183,8 +196,10 @@ export const VerificationService = {
             // Continue even if queue update fails
         }
 
-        // 5. Update Firestore User Status (Real-time for App) - CRITICAL for frontend sync
-        await this.updateUserFirestoreStatus(verification.user_id, 'approved', true);
+        // 5. Update Firestore User Status (Real-time for App) - non-blocking
+        this.updateUserFirestoreStatus(verification.user_id, 'approved', true).catch(err =>
+            console.warn('[Verification] Firestore status update failed (non-critical):', err.message)
+        );
 
         // 6. Send Email
         // Fetch user email first
@@ -232,17 +247,35 @@ export const VerificationService = {
         }
     },
     async getPendingVerifications() {
-        const snapshot = await db.collection('verification_queue')
-            .where('status', '==', 'pending')
-            .orderBy('submittedAt', 'desc')
-            .get();
+        // Fetch from Supabase (Source of Truth) instead of Firestore
+        const { data, error } = await supabase
+            .from('verifications')
+            .select(`
+                *,
+                users:user_id (full_name)
+            `)
+            .eq('status', 'pending')
+            .order('submitted_at', { ascending: false });
 
-        const verifications: any[] = [];
-        snapshot.forEach(doc => {
-            verifications.push(doc.data());
-        });
+        if (error) throw error;
 
-        return verifications;
+        // Transform to match frontend expectation
+        return data.map(v => ({
+            id: v.id,
+            userId: v.user_id,
+            name: v.users?.full_name || 'Unknown User',
+            type: v.verification_type === 'identity' ? 'Identity Verification' : 'Business Verification',
+            method: v.verification_type === 'identity' ? 'Live Video/Photo' : 'CAC Documents',
+            submittedAt: v.submitted_at,
+            status: v.status,
+            details: {
+                id_document_url: v.id_document_url,
+                live_video_url: v.live_video_url,
+                live_photo_url: v.live_photo_url,
+                cac_number: v.cac_number,
+                business_address: v.business_address
+            }
+        }));
     },
 
     async getUserVerificationStatus(userId: string) {

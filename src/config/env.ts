@@ -18,6 +18,10 @@ interface Config {
     SENDGRID_FROM_EMAIL: string;
     PAYSTACK_SECRET_KEY: string;
     PAYSTACK_PUBLIC_KEY: string;
+    STRIPE_SECRET_KEY: string;
+    STRIPE_PUBLIC_KEY: string;
+    STRIPE_WEBHOOK_SECRET: string;
+    FRONTEND_URL: string;
     JWT_SECRET: string;
     JWT_EXPIRES_IN: string;
 }
@@ -48,6 +52,10 @@ export const config: Config = {
 
     PAYSTACK_SECRET_KEY: (process.env.PAYSTACK_SECRET_KEY && process.env.PAYSTACK_SECRET_KEY !== 'PLACEHOLDER') ? process.env.PAYSTACK_SECRET_KEY : 'mock_paystack_secret',
     PAYSTACK_PUBLIC_KEY: (process.env.PAYSTACK_PUBLIC_KEY && process.env.PAYSTACK_PUBLIC_KEY !== 'PLACEHOLDER') ? process.env.PAYSTACK_PUBLIC_KEY : 'mock_paystack_public',
+    STRIPE_SECRET_KEY: getEnvParam('STRIPE_SECRET_KEY'),
+    STRIPE_PUBLIC_KEY: getEnvParam('STRIPE_PUBLIC_KEY'),
+    STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET || '',
+    FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:8081',
     JWT_SECRET: getEnvParam('JWT_SECRET'),
     JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '30d',
 };

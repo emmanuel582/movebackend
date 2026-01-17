@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import { authenticate } from '../middleware/auth.middleware';
-import { initializePayment, verifyPayment, paystackWebhook } from '../controllers/payment.controller';
+import { initializePayment, verifyPayment, confirmPayment, createCheckoutSession } from '../controllers/payment.controller';
 
 const router = Router();
 
-router.post('/webhook', paystackWebhook); // No auth, signature verification
-
 router.post('/initialize', authenticate, initializePayment);
-router.get('/verify/:reference', authenticate, verifyPayment);
+router.post('/create-session', authenticate, createCheckoutSession);
+router.get('/verify', authenticate, verifyPayment);
+router.post('/confirm', authenticate, confirmPayment);
 
 export default router;

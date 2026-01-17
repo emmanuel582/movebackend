@@ -1,35 +1,50 @@
-# dependencies
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Directory for instrumented libs
+lib-cov
+
+# Coverage directory
+coverage
+.nyc_output
+
+# Dependency directories
 node_modules/
 
-# expo
-.expo/
-dist/
-web-build/
-expo-env.d.ts
-
-# native
-*.orig.*
-*.jks
-*.p8
-*.p12
-*.key
-*.mobileprovision
-
-# metro
-.metro-health-check*
-
-# debug
-npm-debug.*
-yarn-debug.*
-yarn-error.*
-
-# macos
-.DS_Store
-*.pem
-
-# local env files
-.env*.local
-.env
-
-# typescript
+# TypeScript cache
 *.tsbuildinfo
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Build output
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PM2
+.pm2/
+
+# Temporary files
+tmp/
+temp/
