@@ -52,8 +52,8 @@ app.use(morgan(config.NODE_ENV === 'production' ? 'combined' : 'dev'));
 import { stripeWebhook } from './controllers/payment.controller';
 app.post('/api/payments/webhook', express.raw({ type: '*/*' }), stripeWebhook);
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Health Check
 app.get('/', (req, res) => {
